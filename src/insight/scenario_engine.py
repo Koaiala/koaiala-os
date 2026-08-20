@@ -1,580 +1,393 @@
+"""
+KOAIALA SCENARIO ENGINE
+
+Transforma as interpretações individuais dos indicadores em
+um diagnóstico macroeconômico integrado.
+
+O motor não produz probabilidades estatísticas. Os percentuais
+de cenário são apenas uma distribuição indicativa para organizar
+a tomada de decisão e devem ser tratados como hipóteses.
+"""
+
+from typing import Dict, List
 from decimal import Decimal
 
 from src.insight.analysis_engine import analisar_indicador
 from src.insight.economic_interpreter import interpretar
+from src.insight.economic_score import (
+    calcular_score_economico,
+    normalizar_sinal,
+)
 
 
-# ============================================================
-# CONFIGURAÇÃO DOS INDICADORES
-# ============================================================
+FALLBACK_INDICATORS = [
+    "SELIC_META",
+    "IPCA",
+    "INPC",
+    "IGP_M",
+    "PIB",
+    "DESEMPREGO",
+    "CAMBIO",
+]
 
-INDICADORES = {
-    "SELIC_META": {
-        "peso": Decimal("1.0"),
-        "grupo": "politica_monetaria"
-    }
-}
+
+def _get_indicator_codes() -> List[str]:
+    try:
+        from src.sense.registry import get_active_indicators
+
+        indicadores = get_active_indicators()
+        if indicadores:
+            return list(indicadores.keys())
+    except Exception:
+        pass
+
+    return FALLBACK_INDICATORS.copy()
 
 
-# ============================================================
-# ANÁLISE INDIVIDUAL
-# ============================================================
-
-def analisar_indicadores():
-    """
-    Executa o Analysis Engine e o Economic Interpreter
-    para todos os indicadores configurados.
-    """
-
+def analisar_indicadores() -> Dict[str, Dict]:
     resultados = {}
 
-    for codigo, configuracao in INDICADORES.items():
+    for codigo in _get_indicator_codes():
+        try:
+            analise = analisar_indicador(codigo)
 
-        analise = analisar_indicador(codigo)
+            if analise.get("status") != "OK":
+                resultados[codigo] = {
+                    "status": "ERRO",
+                    "mensagem": analise.get(
+                        "mensagem",
+                        "Erro ao analisar indicador."
+                    ),
+                }
+                continue
 
-        if analise.get("status") != "OK":
+            interpretacao = interpretar(analise)
 
             resultados[codigo] = {
-                "status": "ERRO",
-                "mensagem": analise.get(
-                    "mensagem",
-                    "Erro ao analisar indicador."
-                )
+                "status": "OK",
+                "analise": analise,
+                "interpretacao": interpretacao,
             }
 
-            continue
-
-        interpretacao = interpretar(analise)
-
-        resultados[codigo] = {
-            "status": "OK",
-            "peso": configuracao["peso"],
-            "grupo": configuracao["grupo"],
-            "analise": analise,
-            "interpretacao": interpretacao
-        }
+        except Exception as error:
+            resultados[codigo] = {
+                "status": "ERRO",
+                "mensagem": str(error),
+            }
 
     return resultados
 
 
-# ============================================================
-# CONVERSÃO DO SINAL ECONÔMICO
-# ============================================================
-
-def obter_sinal(indicador):
+def _sinal_da_interpretacao(indicador: str, interpretacao: Dict) -> str:
     """
-    Converte a interpretação econômica em um sinal numérico.
-
-    +1  = sinal expansionista/favorável
-     0  = neutro
-    -1  = sinal contracionista/desfavorável
-
-    Para a Selic:
-    QUEDA  -> +1
-    ALTA   -> -1
-    ESTÁVEL -> 0
+    Converte REDUÇÃO/ELEVAÇÃO + intensidade em sinal padronizado.
     """
+    direcao = str(
+        interpretacao.get("direcao", "ESTABILIDADE")
+    ).upper()
 
-    interpretacao = indicador["interpretacao"]
+    intensidade = str(
+        interpretacao.get("intensidade", "")
+    ).upper()
 
-    direcao = interpretacao.get(
-        "direcao",
-        "ESTABILIDADE"
+    forte = any(
+        palavra in intensidade
+        for palavra in ("FORTE", "MUITO FORTE")
     )
 
-    if direcao == "REDUÇÃO":
-        return Decimal("1")
+    if direcao in ("REDUÇÃO", "REDUCAO"):
+        return "FORTE_QUEDA" if forte else "QUEDA"
 
-    if direcao == "ELEVAÇÃO":
-        return Decimal("-1")
+    if direcao in ("ELEVAÇÃO", "ELEVACAO"):
+        return "FORTE_ALTA" if forte else "ALTA"
 
-    return Decimal("0")
+    return "ESTABILIDADE"
 
 
-# ============================================================
-# CÁLCULO DO SCORE
-# ============================================================
-
-def calcular_score(resultados):
-    """
-    Calcula o score econômico agregado.
-
-    O score varia de -1 a +1.
-
-    +1 = conjunto de sinais expansionistas
-     0 = cenário neutro
-    -1 = conjunto de sinais contracionistas
-    """
-
-    soma_ponderada = Decimal("0")
-    soma_pesos = Decimal("0")
+def extrair_sinais(resultados: Dict[str, Dict]) -> Dict[str, str]:
+    sinais = {}
 
     for codigo, resultado in resultados.items():
-
         if resultado.get("status") != "OK":
             continue
 
-        peso = resultado["peso"]
+        interpretacao = resultado.get("interpretacao", {})
+        sinais[codigo] = _sinal_da_interpretacao(
+            codigo,
+            interpretacao,
+        )
 
-        sinal = obter_sinal(resultado)
-
-        soma_ponderada += sinal * peso
-        soma_pesos += peso
-
-    if soma_pesos == 0:
-
-        return Decimal("0")
-
-    score = soma_ponderada / soma_pesos
-
-    return score
+    return sinais
 
 
-# ============================================================
-# CLASSIFICAÇÃO DO CENÁRIO
-# ============================================================
-
-def classificar_cenario(score):
-    """
-    Classifica o cenário econômico agregado.
-    """
-
-    if score >= Decimal("0.50"):
-
-        return "EXPANSIONISTA"
-
-    if score >= Decimal("0.15"):
-
-        return "LEVE EXPANSÃO"
-
-    if score > Decimal("-0.15"):
-
-        return "NEUTRO"
-
-    if score > Decimal("-0.50"):
-
-        return "LEVE CONTRAÇÃO"
-
-    return "CONTRACIONISTA"
-
-
-# ============================================================
-# CONFIANÇA DO CENÁRIO
-# ============================================================
-
-def calcular_confianca(resultados):
-    """
-    Calcula uma confiança inicial baseada na qualidade
-    das interpretações disponíveis.
-
-    Esta não é uma probabilidade estatística.
-    """
-
-    indicadores_validos = 0
-    soma_confianca = Decimal("0")
-
-    mapa_confianca = {
-        "ALTA": Decimal("1.0"),
-        "MODERADA": Decimal("0.6"),
-        "BAIXA": Decimal("0.3")
+def calcular_confianca_detalhada(
+    resultados: Dict[str, Dict],
+) -> Dict:
+    pesos = {
+        "ALTA": 1.0,
+        "MODERADA": 0.6,
+        "BAIXA": 0.3,
+        "MUITO_BAIXA": 0.15,
+        "INSUFICIENTE": 0.0,
     }
 
-    for resultado in resultados.values():
+    valores = []
 
+    for resultado in resultados.values():
         if resultado.get("status") != "OK":
             continue
 
-        indicadores_validos += 1
-
-        confianca = resultado[
-            "interpretacao"
-        ].get(
+        nivel = resultado["interpretacao"].get(
             "confianca",
-            "BAIXA"
+            "BAIXA",
         )
 
-        soma_confianca += mapa_confianca.get(
-            confianca,
-            Decimal("0.3")
+        valores.append(
+            pesos.get(nivel, 0.3)
         )
 
-    if indicadores_validos == 0:
-
+    if not valores:
         return {
-            "nivel": "BAIXA",
-            "score": Decimal("0")
+            "nivel": "INSUFICIENTE",
+            "score": 0.0,
+            "indicadores_validos": 0,
         }
 
-    score = (
-        soma_confianca
-        / Decimal(str(indicadores_validos))
+    score = sum(valores) / len(valores)
+
+    # Cobertura também pesa na confiança.
+    cobertura = len(valores) / len(
+        _get_indicator_codes()
     )
 
-    if score >= Decimal("0.80"):
+    score_final = score * (0.5 + 0.5 * cobertura)
 
+    if score_final >= 0.80:
         nivel = "ALTA"
-
-    elif score >= Decimal("0.50"):
-
+    elif score_final >= 0.50:
         nivel = "MODERADA"
-
-    else:
-
+    elif score_final >= 0.25:
         nivel = "BAIXA"
+    else:
+        nivel = "MUITO_BAIXA"
 
     return {
         "nivel": nivel,
-        "score": score
+        "score": round(score_final, 4),
+        "indicadores_validos": len(valores),
+        "cobertura": round(cobertura, 4),
     }
 
 
-# ============================================================
-# CENÁRIOS ALTERNATIVOS
-# ============================================================
-
-def gerar_cenarios(score):
+def gerar_cenarios(
+    score: float,
+    confianca: Dict,
+) -> Dict:
     """
-    Gera três cenários estruturais.
-
-    Importante:
-    estes cenários ainda não representam probabilidades.
-    São hipóteses qualitativas.
+    Distribuição indicativa, não estatística.
     """
+    score = float(score)
+    nivel = confianca.get("nivel", "BAIXA")
 
-    # --------------------------------------------------------
-    # CENÁRIO EXPANSIONISTA
-    # --------------------------------------------------------
-
-    if score > Decimal("0"):
-
-        expansionista = (
-            "Cenário compatível com maior flexibilização "
-            "das condições monetárias e financeiras."
-        )
-
+    if score >= 0.75:
+        base = {"otimista": 0.55, "base": 0.30, "adverso": 0.15}
+    elif score >= 0.25:
+        base = {"otimista": 0.40, "base": 0.45, "adverso": 0.15}
+    elif score > -0.25:
+        base = {"otimista": 0.25, "base": 0.50, "adverso": 0.25}
+    elif score > -0.75:
+        base = {"otimista": 0.15, "base": 0.45, "adverso": 0.40}
     else:
+        base = {"otimista": 0.15, "base": 0.30, "adverso": 0.55}
 
-        expansionista = (
-            "Cenário expansionista exigiria uma melhora "
-            "dos sinais atualmente observados."
-        )
+    if nivel in ("BAIXA", "MUITO_BAIXA", "INSUFICIENTE"):
+        # Em baixa confiança, aproximamos as hipóteses da neutralidade.
+        base["base"] += 0.10
+        if base["otimista"] > base["adverso"]:
+            base["otimista"] -= 0.05
+            base["adverso"] -= 0.05
+        else:
+            base["otimista"] -= 0.05
+            base["adverso"] -= 0.05
 
-    # --------------------------------------------------------
-    # CENÁRIO BASE
-    # --------------------------------------------------------
+    total = sum(base.values())
 
-    base = (
-        "Cenário de continuidade das condições econômicas "
-        "atuais, sem mudança estrutural significativa."
-    )
-
-    # --------------------------------------------------------
-    # CENÁRIO CONTRACIONISTA
-    # --------------------------------------------------------
-
-    if score < Decimal("0"):
-
-        contracionista = (
-            "Cenário compatível com maior restrição "
-            "monetária e financeira."
-        )
-
-    else:
-
-        contracionista = (
-            "Cenário contracionista exigiria uma piora "
-            "dos sinais atualmente observados."
-        )
+    for chave in base:
+        base[chave] = round(base[chave] / total, 4)
 
     return {
-
-        "expansionista": expansionista,
-
-        "base": base,
-
-        "contracionista": contracionista
+        "metodo": "distribuicao_indicativa_nao_estatistica",
+        "otimista": {
+            "participacao": base["otimista"],
+            "descricao": (
+                "Melhora das condições econômicas, "
+                "com convergência favorável dos indicadores."
+            ),
+        },
+        "base": {
+            "participacao": base["base"],
+            "descricao": (
+                "Continuidade do comportamento atual, "
+                "sem ruptura estrutural relevante."
+            ),
+        },
+        "adverso": {
+            "participacao": base["adverso"],
+            "descricao": (
+                "Piora das condições econômicas ou "
+                "reversão dos sinais favoráveis."
+            ),
+        },
     }
 
 
-# ============================================================
-# GERAÇÃO DA LEITURA ECONÔMICA
-# ============================================================
+def classificar_cenario(score: float) -> str:
+    if score >= 1.25:
+        return "MUITO_OTIMISTA"
+    if score >= 0.50:
+        return "OTIMISTA"
+    if score >= 0.15:
+        return "NEUTRO_FAVORAVEL"
+    if score > -0.15:
+        return "NEUTRO"
+    if score > -0.50:
+        return "NEUTRO_DESFAVORAVEL"
+    if score > -1.25:
+        return "ADVERSO"
+    return "MUITO_ADVERSO"
 
-def gerar_interpretacao_cenario(
-    classificacao,
-    score,
-    resultados
-):
-    """
-    Produz uma interpretação textual do cenário agregado.
-    """
 
-    indicadores_validos = [
-        codigo
-        for codigo, resultado in resultados.items()
-        if resultado.get("status") == "OK"
-    ]
-
-    if not indicadores_validos:
-
-        return (
-            "Não existem indicadores suficientes para "
-            "produzir uma leitura econômica."
+def gerar_interpretacao(
+    classificacao: str,
+    score: float,
+    sinais: Dict[str, str],
+) -> str:
+    favoraveis = sum(
+        1 for sinal in sinais.values()
+        if normalizar_sinal(sinal) in (
+            "QUEDA",
+            "FORTE_QUEDA",
+            "FORTE_ALTA",
         )
-
-    if classificacao == "EXPANSIONISTA":
-
-        texto = (
-            "Os sinais disponíveis apontam para um ambiente "
-            "predominantemente expansionista."
-        )
-
-    elif classificacao == "LEVE EXPANSÃO":
-
-        texto = (
-            "Os sinais disponíveis apresentam viés "
-            "levemente expansionista."
-        )
-
-    elif classificacao == "NEUTRO":
-
-        texto = (
-            "Os sinais disponíveis não apresentam "
-            "predominância clara entre expansão e contração."
-        )
-
-    elif classificacao == "LEVE CONTRAÇÃO":
-
-        texto = (
-            "Os sinais disponíveis apresentam viés "
-            "levemente contracionista."
-        )
-
-    else:
-
-        texto = (
-            "Os sinais disponíveis apontam para um ambiente "
-            "predominantemente contracionista."
-        )
-
-    texto += (
-        f" O score agregado calculado foi "
-        f"{score:.2f}."
     )
 
-    return texto
+    total = len(sinais)
+
+    if classificacao in ("MUITO_OTIMISTA", "OTIMISTA"):
+        abertura = (
+            "O conjunto de sinais disponíveis apresenta "
+            "predominância favorável."
+        )
+    elif classificacao in ("ADVERSO", "MUITO_ADVERSO"):
+        abertura = (
+            "O conjunto de sinais disponíveis apresenta "
+            "predominância desfavorável."
+        )
+    else:
+        abertura = (
+            "O conjunto de sinais disponíveis ainda não "
+            "apresenta predominância suficientemente forte."
+        )
+
+    return (
+        f"{abertura} Score normalizado: {score:.2f}. "
+        f"Foram identificados {favoraveis} sinais favoráveis "
+        f"entre {total} sinais válidos."
+    )
 
 
-# ============================================================
-# MOTOR PRINCIPAL
-# ============================================================
-
-def construir_cenario():
-    """
-    Executa o fluxo completo do Scenario Engine.
-    """
-
+def construir_cenario() -> Dict:
     resultados = analisar_indicadores()
+    sinais = extrair_sinais(resultados)
 
-    indicadores_validos = [
-        codigo
-        for codigo, resultado in resultados.items()
-        if resultado.get("status") == "OK"
-    ]
-
-    if not indicadores_validos:
-
+    if not sinais:
         return {
             "status": "ERRO",
-            "mensagem": (
-                "Nenhum indicador válido disponível."
-            )
+            "mensagem": "Nenhum indicador válido disponível.",
         }
 
-    score = calcular_score(resultados)
+    score = calcular_score_economico(sinais)
+    confianca = calcular_confianca_detalhada(resultados)
 
     classificacao = classificar_cenario(
-        score
-    )
-
-    confianca = calcular_confianca(
-        resultados
+        score["score_normalizado"]
     )
 
     cenarios = gerar_cenarios(
-        score
+        score["score_normalizado"],
+        confianca,
     )
 
-    interpretacao = gerar_interpretacao_cenario(
+    interpretacao = gerar_interpretacao(
         classificacao,
-        score,
-        resultados
+        score["score_normalizado"],
+        sinais,
     )
 
     return {
-
         "status": "OK",
-
-        "score": score,
-
+        "score": score["score_normalizado"],
+        "score_detalhado": score,
         "classificacao": classificacao,
-
         "confianca": confianca,
-
-        "indicadores_analisados": (
-            indicadores_validos
-        ),
-
-        "total_indicadores": len(
-            indicadores_validos
-        ),
-
+        "indicadores_analisados": list(sinais.keys()),
+        "total_indicadores": len(sinais),
         "cenarios": cenarios,
-
         "interpretacao": interpretacao,
-
-        "indicadores": resultados
+        "sinais": sinais,
+        "indicadores": resultados,
     }
 
 
-# ============================================================
-# EXIBIÇÃO
-# ============================================================
-
-def exibir_cenario(resultado):
-    """
-    Exibe o cenário econômico da Koaiala.
-    """
-
+def exibir_cenario(resultado: Dict) -> None:
     print("=" * 60)
     print("KOAIALA SCENARIO ENGINE")
     print("=" * 60)
 
     if resultado.get("status") != "OK":
-
-        print(
-            f"Status: {resultado.get('status')}"
-        )
-
-        print(
-            f"Mensagem: {resultado.get('mensagem')}"
-        )
-
+        print("STATUS:", resultado.get("status"))
+        print("MENSAGEM:", resultado.get("mensagem"))
         print("=" * 60)
-
         return
 
     print(
-        "Indicadores analisados: "
-        f"{resultado['total_indicadores']}"
+        "Indicadores:",
+        ", ".join(resultado["indicadores_analisados"]),
     )
-
     print(
-        f"Indicadores: "
-        f"{', '.join(resultado['indicadores_analisados'])}"
+        f"Score: {resultado['score']:.4f}"
     )
-
+    print(
+        f"Classificação: {resultado['classificacao']}"
+    )
+    print(
+        f"Confiança: {resultado['confianca']['nivel']}"
+    )
+    print(
+        f"Cobertura: "
+        f"{resultado['confianca']['cobertura']:.0%}"
+    )
+    print("-" * 60)
+    print("LEITURA:")
+    print(resultado["interpretacao"])
     print("-" * 60)
 
-    print(
-        f"Score econômico: "
-        f"{resultado['score']:.2f}"
-    )
-
-    print(
-        f"Classificação: "
-        f"{resultado['classificacao']}"
-    )
-
-    print(
-        f"Confiança: "
-        f"{resultado['confianca']['nivel']}"
-    )
-
-    print(
-        f"Score de confiança: "
-        f"{resultado['confianca']['score']:.2f}"
-    )
-
-    print("-" * 60)
-
-    print("LEITURA ECONÔMICA:")
-
-    print(
-        resultado["interpretacao"]
-    )
-
-    print("-" * 60)
-
-    print("CENÁRIOS:")
-
-    print()
-
-    print("EXPANSIONISTA:")
-    print(
-        resultado["cenarios"]["expansionista"]
-    )
-
-    print()
-
-    print("BASE:")
-    print(
-        resultado["cenarios"]["base"]
-    )
-
-    print()
-
-    print("CONTRACIONISTA:")
-    print(
-        resultado["cenarios"]["contracionista"]
-    )
-
-    print("-" * 60)
-
-    print("SINAIS DOS INDICADORES:")
-
-    for codigo, indicador in resultado[
-        "indicadores"
-    ].items():
-
-        if indicador.get("status") != "OK":
-
-            print(
-                f"{codigo}: ERRO"
-            )
-
-            continue
-
-        interpretacao = indicador[
-            "interpretacao"
-        ]
-
-        sinal = obter_sinal(
-            indicador
-        )
-
+    for nome in ("otimista", "base", "adverso"):
+        cenario = resultado["cenarios"][nome]
         print(
-            f"{codigo}: "
-            f"{interpretacao['direcao']} "
-            f"(sinal {sinal:+.0f})"
+            f"{nome.upper()}: "
+            f"{cenario['participacao']:.0%} | "
+            f"{cenario['descricao']}"
         )
 
     print("=" * 60)
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-
-    resultado = construir_cenario()
-
     exibir_cenario(
-        resultado
+        construir_cenario()
     )
 
 
 if __name__ == "__main__":
-
     main()

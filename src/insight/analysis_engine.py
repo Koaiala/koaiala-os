@@ -1,10 +1,184 @@
+"""
+KOAIALA
+ANALYSIS ENGINE
+
+Motor quantitativo responsável por analisar as observações
+econômicas armazenadas no PostgreSQL.
+
+O Analysis Engine não interpreta o significado econômico
+do indicador.
+
+Ele responde perguntas quantitativas como:
+
+    Qual é o valor atual?
+    Qual era o valor anterior?
+    Quanto variou?
+    Qual é a tendência atual?
+    Qual é a tendência de curto prazo?
+    Qual é a tendência histórica?
+    A tendência possui força ou é apenas uma oscilação?
+
+A interpretação econômica é realizada posteriormente
+pelo Economic Interpreter.
+"""
+
 from decimal import Decimal
-from statistics import mean
+
 
 from src.database.connection import get_connection
 
 
-def analisar_indicador(indicator_code):
+# ============================================================
+# CONFIGURAÇÃO DA ANÁLISE
+# ============================================================
+
+SHORT_TERM_WINDOW = 5
+
+HISTORICAL_WINDOW = 12
+
+
+# ============================================================
+# CLASSIFICAÇÃO DE TENDÊNCIA
+# ============================================================
+
+def classificar_tendencia(
+    valores
+):
+    """
+    Determina a tendência predominante de uma sequência.
+
+    A classificação considera as variações entre
+    observações consecutivas.
+
+    Retorna:
+
+        ALTA
+        QUEDA
+        ESTABILIDADE
+    """
+
+    if len(valores) < 2:
+        return "ESTABILIDADE"
+
+    altas = 0
+    quedas = 0
+
+    for i in range(
+        1,
+        len(valores)
+    ):
+
+        if valores[i] > valores[i - 1]:
+            altas += 1
+
+        elif valores[i] < valores[i - 1]:
+            quedas += 1
+
+    if altas > quedas:
+        return "ALTA"
+
+    if quedas > altas:
+        return "QUEDA"
+
+    return "ESTABILIDADE"
+
+
+# ============================================================
+# FORÇA DA TENDÊNCIA
+# ============================================================
+
+def calcular_forca_tendencia(
+    valores
+):
+    """
+    Calcula a força da tendência a partir da proporção
+    de movimentos que apontam para a mesma direção.
+
+    Retorna:
+
+        MUITO_FRACA
+        FRACA
+        MODERADA
+        FORTE
+        MUITO_FORTE
+    """
+
+    if len(valores) < 2:
+        return "MUITO_FRACA"
+
+    movimentos = 0
+    direcao_predominante = 0
+
+    for i in range(
+        1,
+        len(valores)
+    ):
+
+        if valores[i] > valores[i - 1]:
+            movimentos += 1
+            direcao_predominante += 1
+
+        elif valores[i] < valores[i - 1]:
+            movimentos += 1
+            direcao_predominante -= 1
+
+    if movimentos == 0:
+        return "MUITO_FRACA"
+
+    intensidade = (
+        abs(direcao_predominante)
+        / movimentos
+    )
+
+    if intensidade >= Decimal("0.80"):
+        return "MUITO_FORTE"
+
+    if intensidade >= Decimal("0.60"):
+        return "FORTE"
+
+    if intensidade >= Decimal("0.40"):
+        return "MODERADA"
+
+    if intensidade >= Decimal("0.20"):
+        return "FRACA"
+
+    return "MUITO_FRACA"
+
+
+# ============================================================
+# MÉDIA DECIMAL
+# ============================================================
+
+def calcular_media(
+    valores
+):
+    """
+    Calcula a média mantendo Decimal.
+    """
+
+    if not valores:
+        return Decimal("0")
+
+    total = sum(
+        valores,
+        Decimal("0")
+    )
+
+    return (
+        total
+        / Decimal(
+            str(len(valores))
+        )
+    )
+
+
+# ============================================================
+# ANÁLISE DE UM INDICADOR
+# ============================================================
+
+def analisar_indicador(
+    indicator_code
+):
     """
     Motor genérico de análise econômica da Koaiala.
 
@@ -15,11 +189,12 @@ def analisar_indicador(indicator_code):
     connection = get_connection()
 
     try:
+
         cursor = connection.cursor()
 
-        # ============================================================
-        # 1. BUSCA OS DADOS DO INDICADOR
-        # ============================================================
+        # ====================================================
+        # 1. BUSCA OS DADOS
+        # ====================================================
 
         cursor.execute(
             """
@@ -30,186 +205,367 @@ def analisar_indicador(indicator_code):
             WHERE indicator_code = %s
             ORDER BY observation_date ASC
             """,
-            (indicator_code,)
+            (
+                indicator_code,
+            )
         )
 
         registros = cursor.fetchall()
 
         if not registros:
+
             return {
                 "status": "ERRO",
-                "mensagem": f"Nenhum dado encontrado para {indicator_code}"
+                "mensagem":
+                    f"Nenhum dado encontrado "
+                    f"para {indicator_code}"
             }
 
-        # ============================================================
+        # ====================================================
         # 2. ORGANIZA OS DADOS
-        # ============================================================
+        # ====================================================
 
-        datas = [registro[0] for registro in registros]
-        valores = [Decimal(str(registro[1])) for registro in registros]
+        datas = [
+            registro[0]
+            for registro in registros
+        ]
+
+        valores = [
+            Decimal(
+                str(registro[1])
+            )
+            for registro in registros
+        ]
 
         data_atual = datas[-1]
+
         valor_atual = valores[-1]
 
-        # ============================================================
+        # ====================================================
         # 3. VALOR ANTERIOR
-        # ============================================================
+        # ====================================================
 
         valor_anterior = None
+
         data_anterior = None
 
         if len(valores) >= 2:
+
             valor_anterior = valores[-2]
+
             data_anterior = datas[-2]
 
-        # ============================================================
+        # ====================================================
         # 4. VARIAÇÃO ABSOLUTA
-        # ============================================================
+        # ====================================================
 
         variacao_absoluta = None
 
         if valor_anterior is not None:
-            variacao_absoluta = valor_atual - valor_anterior
 
-        # ============================================================
+            variacao_absoluta = (
+                valor_atual
+                - valor_anterior
+            )
+
+        # ====================================================
         # 5. VARIAÇÃO PERCENTUAL
-        # ============================================================
+        # ====================================================
 
         variacao_percentual = None
 
-        if valor_anterior is not None and valor_anterior != 0:
+        if (
+            valor_anterior is not None
+            and valor_anterior != 0
+        ):
+
             variacao_percentual = (
-                (valor_atual - valor_anterior)
+                (
+                    valor_atual
+                    - valor_anterior
+                )
                 / valor_anterior
             ) * Decimal("100")
 
-        # ============================================================
+        # ====================================================
         # 6. MÁXIMO, MÍNIMO E MÉDIA
-        # ============================================================
+        # ====================================================
 
-        valor_maximo = max(valores)
-        valor_minimo = min(valores)
-
-        media = Decimal(
-            str(mean(float(valor) for valor in valores))
+        valor_maximo = max(
+            valores
         )
 
-        # ============================================================
-        # 7. CONTAGEM DE OBSERVAÇÕES
-        # ============================================================
+        valor_minimo = min(
+            valores
+        )
 
-        total_observacoes = len(valores)
+        media = calcular_media(
+            valores
+        )
 
-        # ============================================================
-        # 8. IDENTIFICA MUDANÇAS
-        # ============================================================
+        # ====================================================
+        # 7. CONTAGEM
+        # ====================================================
+
+        total_observacoes = len(
+            valores
+        )
+
+        # ====================================================
+        # 8. MUDANÇAS
+        # ====================================================
 
         mudancas = []
 
-        for i in range(1, len(valores)):
+        for i in range(
+            1,
+            len(valores)
+        ):
 
             if valores[i] != valores[i - 1]:
 
                 mudancas.append(
                     {
-                        "data": datas[i],
-                        "valor_anterior": valores[i - 1],
-                        "novo_valor": valores[i],
-                        "variacao": valores[i] - valores[i - 1]
+                        "data":
+                            datas[i],
+
+                        "valor_anterior":
+                            valores[i - 1],
+
+                        "novo_valor":
+                            valores[i],
+
+                        "variacao":
+                            (
+                                valores[i]
+                                - valores[i - 1]
+                            )
                     }
                 )
 
-        total_mudancas = len(mudancas)
+        total_mudancas = len(
+            mudancas
+        )
 
-        # ============================================================
+        # ====================================================
         # 9. ÚLTIMA MUDANÇA
-        # ============================================================
+        # ====================================================
 
         ultima_mudanca = None
 
         if mudancas:
-            ultima_mudanca = mudancas[-1]
 
-        # ============================================================
-        # 10. TENDÊNCIA
-        # ============================================================
+            ultima_mudanca = (
+                mudancas[-1]
+            )
 
-        tendencia = "ESTÁVEL"
+        # ====================================================
+        # 10. TENDÊNCIA ATUAL
+        # ====================================================
+
+        tendencia_atual = (
+            "ESTABILIDADE"
+        )
 
         if valor_anterior is not None:
 
-            if valor_atual > valor_anterior:
-                tendencia = "ALTA"
+            if (
+                valor_atual
+                > valor_anterior
+            ):
 
-            elif valor_atual < valor_anterior:
-                tendencia = "QUEDA"
+                tendencia_atual = "ALTA"
 
-        # ============================================================
-        # 11. DIAS NO NÍVEL ATUAL
-        # ============================================================
+            elif (
+                valor_atual
+                < valor_anterior
+            ):
 
-        data_inicio_nivel = data_atual
+                tendencia_atual = "QUEDA"
 
-        for i in range(len(valores) - 2, -1, -1):
+        # Mantém compatibilidade
+        # com o Economic Interpreter.
 
-            if valores[i] == valor_atual:
-                data_inicio_nivel = datas[i]
+        tendencia = (
+            tendencia_atual
+        )
+
+        # ====================================================
+        # 11. TENDÊNCIA DE CURTO PRAZO
+        # ====================================================
+
+        quantidade_curta = min(
+            SHORT_TERM_WINDOW,
+            len(valores)
+        )
+
+        valores_curto_prazo = (
+            valores[
+                -quantidade_curta:
+            ]
+        )
+
+        tendencia_curta = (
+            classificar_tendencia(
+                valores_curto_prazo
+            )
+        )
+
+        forca_tendencia_curta = (
+            calcular_forca_tendencia(
+                valores_curto_prazo
+            )
+        )
+
+        # ====================================================
+        # 12. TENDÊNCIA HISTÓRICA
+        # ====================================================
+
+        quantidade_historica = min(
+            HISTORICAL_WINDOW,
+            len(valores)
+        )
+
+        valores_historicos = (
+            valores[
+                -quantidade_historica:
+            ]
+        )
+
+        tendencia_historica = (
+            classificar_tendencia(
+                valores_historicos
+            )
+        )
+
+        forca_tendencia_historica = (
+            calcular_forca_tendencia(
+                valores_historicos
+            )
+        )
+
+        # ====================================================
+        # 13. FORÇA GERAL DA TENDÊNCIA
+        # ====================================================
+
+        forca_tendencia = (
+            forca_tendencia_curta
+        )
+
+        # ====================================================
+        # 14. INÍCIO DO NÍVEL ATUAL
+        # ====================================================
+
+        data_inicio_nivel = (
+            data_atual
+        )
+
+        for i in range(
+            len(valores) - 2,
+            -1,
+            -1
+        ):
+
+            if (
+                valores[i]
+                == valor_atual
+            ):
+
+                data_inicio_nivel = (
+                    datas[i]
+                )
 
             else:
+
                 break
 
         dias_no_nivel = (
-            data_atual - data_inicio_nivel
+            data_atual
+            - data_inicio_nivel
         ).days
 
-        # ============================================================
-        # 12. TENDÊNCIA HISTÓRICA
-        # ============================================================
-
-        tendencia_historica = "ESTÁVEL"
-
-        if len(valores) >= 2:
-
-            primeiro_valor = valores[0]
-
-            if valor_atual > primeiro_valor:
-                tendencia_historica = "ALTA"
-
-            elif valor_atual < primeiro_valor:
-                tendencia_historica = "QUEDA"
-
-        # ============================================================
-        # 13. RETORNO DA ANÁLISE
-        # ============================================================
+        # ====================================================
+        # 15. RETORNO
+        # ====================================================
 
         return {
-            "status": "OK",
 
-            "indicador": indicator_code,
+            "status":
+                "OK",
 
-            "data_atual": data_atual,
-            "valor_atual": valor_atual,
+            "indicador":
+                indicator_code,
 
-            "data_anterior": data_anterior,
-            "valor_anterior": valor_anterior,
+            "data_atual":
+                data_atual,
 
-            "variacao_absoluta": variacao_absoluta,
-            "variacao_percentual": variacao_percentual,
+            "valor_atual":
+                valor_atual,
 
-            "valor_maximo": valor_maximo,
-            "valor_minimo": valor_minimo,
-            "media": media,
+            "data_anterior":
+                data_anterior,
 
-            "total_observacoes": total_observacoes,
+            "valor_anterior":
+                valor_anterior,
 
-            "total_mudancas": total_mudancas,
-            "ultima_mudanca": ultima_mudanca,
+            "variacao_absoluta":
+                variacao_absoluta,
 
-            "tendencia": tendencia,
-            "tendencia_historica": tendencia_historica,
+            "variacao_percentual":
+                variacao_percentual,
 
-            "data_inicio_nivel": data_inicio_nivel,
-            "dias_no_nivel": dias_no_nivel
+            "valor_maximo":
+                valor_maximo,
+
+            "valor_minimo":
+                valor_minimo,
+
+            "media":
+                media,
+
+            "total_observacoes":
+                total_observacoes,
+
+            "total_mudancas":
+                total_mudancas,
+
+            "ultima_mudanca":
+                ultima_mudanca,
+
+            # --------------------------------------------
+            # TENDÊNCIAS
+            # --------------------------------------------
+
+            "tendencia":
+                tendencia,
+
+            "tendencia_atual":
+                tendencia_atual,
+
+            "tendencia_curta":
+                tendencia_curta,
+
+            "tendencia_historica":
+                tendencia_historica,
+
+            "forca_tendencia":
+                forca_tendencia,
+
+            "forca_tendencia_curta":
+                forca_tendencia_curta,
+
+            "forca_tendencia_historica":
+                forca_tendencia_historica,
+
+            # --------------------------------------------
+            # NÍVEL
+            # --------------------------------------------
+
+            "data_inicio_nivel":
+                data_inicio_nivel,
+
+            "dias_no_nivel":
+                dias_no_nivel
         }
 
     finally:
@@ -217,25 +573,49 @@ def analisar_indicador(indicator_code):
         connection.close()
 
 
-def exibir_analise(resultado):
+# ============================================================
+# EXIBIÇÃO DA ANÁLISE
+# ============================================================
+
+def exibir_analise(
+    resultado
+):
     """
     Exibe a análise do indicador de forma organizada.
     """
 
     print("=" * 60)
-    print("KOAIALA ANALYSIS ENGINE")
+
+    print(
+        "KOAIALA ANALYSIS ENGINE"
+    )
+
     print("=" * 60)
 
-    if resultado["status"] != "OK":
+    if (
+        resultado["status"]
+        != "OK"
+    ):
 
-        print(f"Status: {resultado['status']}")
-        print(f"Mensagem: {resultado['mensagem']}")
+        print(
+            f"Status: "
+            f"{resultado['status']}"
+        )
+
+        print(
+            f"Mensagem: "
+            f"{resultado['mensagem']}"
+        )
 
         print("=" * 60)
 
         return
 
-    print(f"Indicador: {resultado['indicador']}")
+    print(
+        f"Indicador: "
+        f"{resultado['indicador']}"
+    )
+
     print("-" * 60)
 
     print(
@@ -248,7 +628,9 @@ def exibir_analise(resultado):
         f"{resultado['valor_atual']}"
     )
 
-    if resultado["data_anterior"]:
+    if (
+        resultado["data_anterior"]
+    ):
 
         print(
             f"Data anterior: "
@@ -262,14 +644,20 @@ def exibir_analise(resultado):
 
     print("-" * 60)
 
-    if resultado["variacao_absoluta"] is not None:
+    if (
+        resultado["variacao_absoluta"]
+        is not None
+    ):
 
         print(
             f"Variação absoluta: "
             f"{resultado['variacao_absoluta']}"
         )
 
-    if resultado["variacao_percentual"] is not None:
+    if (
+        resultado["variacao_percentual"]
+        is not None
+    ):
 
         print(
             f"Variação percentual: "
@@ -305,9 +693,15 @@ def exibir_analise(resultado):
         f"{resultado['total_mudancas']}"
     )
 
-    if resultado["ultima_mudanca"]:
+    if (
+        resultado["ultima_mudanca"]
+    ):
 
-        mudanca = resultado["ultima_mudanca"]
+        mudanca = (
+            resultado[
+                "ultima_mudanca"
+            ]
+        )
 
         print(
             "Última mudança: "
@@ -333,12 +727,32 @@ def exibir_analise(resultado):
 
     print(
         f"Tendência atual: "
-        f"{resultado['tendencia']}"
+        f"{resultado['tendencia_atual']}"
+    )
+
+    print(
+        f"Tendência curta: "
+        f"{resultado['tendencia_curta']}"
     )
 
     print(
         f"Tendência histórica: "
         f"{resultado['tendencia_historica']}"
+    )
+
+    print(
+        f"Força da tendência: "
+        f"{resultado['forca_tendencia']}"
+    )
+
+    print(
+        f"Força curta: "
+        f"{resultado['forca_tendencia_curta']}"
+    )
+
+    print(
+        f"Força histórica: "
+        f"{resultado['forca_tendencia_historica']}"
     )
 
     print(
@@ -354,12 +768,37 @@ def exibir_analise(resultado):
     print("=" * 60)
 
 
+# ============================================================
+# TESTE
+# ============================================================
+
 def main():
 
-    resultado = analisar_indicador("SELIC_META")
+    indicadores = [
+        "SELIC_META",
+        "IPCA",
+        "INPC",
+        "IGP_M",
+    ]
 
-    exibir_analise(resultado)
+    for indicador in indicadores:
 
+        print()
+
+        resultado = (
+            analisar_indicador(
+                indicador
+            )
+        )
+
+        exibir_analise(
+            resultado
+        )
+
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
 
 if __name__ == "__main__":
     main()
